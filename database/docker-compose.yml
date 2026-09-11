@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: quan-ly-ho-so-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: quan_ly_ho_so
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: change_me_in_production
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+volumes:
+  postgres_data:
