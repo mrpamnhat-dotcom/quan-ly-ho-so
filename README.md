@@ -1,64 +1,96 @@
-# Quản lý hồ sơ
+# Quản lý hồ sơ — v1.1
 
-Ứng dụng web quản lý hồ sơ cho khoảng 100 người.
+Ứng dụng web quản lý hồ sơ cho khoảng 100 nhân viên.
+
+## Mô hình truy cập v1.1
+
+- Chỉ có **1 link / 1 QR Code dùng chung** cho tất cả nhân viên.
+- Nhân viên mở QR chung, gõ/tìm tên của mình trong danh sách và nhập **mã xác thực 6 số**.
+- Mã xác thực do hệ thống tự sinh khi Admin (quản trị viên) tạo nhân viên.
+- Admin có thể **tạo lại mã xác thực**; mã cũ hết hiệu lực và các phiên của nhân viên đó bị thu hồi.
+- Trình duyệt lưu danh sách nhân viên đã dùng gần đây để lần sau chọn tên nhanh hơn. Đây chỉ là tiện ích trên thiết bị, không phải thông tin xác thực.
+- Nhân viên không có tài khoản riêng và không cần link riêng.
+- Admin truy cập khu vực riêng tại `/admin`.
+
+## Luồng sử dụng
+
+```text
+QR dùng chung
+    ↓
+Trang nộp hồ sơ
+    ↓
+Chọn / tìm tên nhân viên
+    ↓
+Nhập mã xác thực 6 số
+    ↓
+Phiên xác thực tạm thời
+    ↓
+Xem danh sách giấy tờ của chính mình
+    ↓
+Upload (tải lên) / nộp lại tài liệu
+```
+
+## Chức năng Admin
+
+- Đăng nhập Admin.
+- Tạo / xóa nhân viên.
+- Hệ thống tự sinh mã xác thực 6 số.
+- Tạo lại mã xác thực khi cần.
+- Tạo / xóa loại giấy tờ.
+- Xem tổng quan tiến độ.
+- Tìm kiếm và lọc tài liệu.
+- Tải file hồ sơ.
+- Hiển thị QR dùng chung để in hoặc chia sẻ.
+
+## Bảo mật
+
+- Không lưu mã xác thực dạng rõ trong Database (cơ sở dữ liệu).
+- Sau khi tạo hoặc tạo lại mã, mã chỉ được hiển thị một lần trong màn hình Admin.
+- Phiên nhân viên có thời hạn và được lưu dưới dạng hash (băm).
+- Tạo lại mã sẽ thu hồi các phiên cũ của nhân viên.
+- Có Rate limit (giới hạn tần suất) cho các API công khai.
+- Không lưu mật khẩu, mã xác thực, token (mã phiên) hoặc nội dung file vào Audit log (nhật ký kiểm toán).
+- File hồ sơ không lưu trong Git repository (kho mã nguồn Git).
+- Production (môi trường thật) nên dùng Storage (kho lưu file) riêng và HTTPS.
 
 ## Công nghệ
 
-- Frontend (giao diện web): React + Vite
-- Backend (phần xử lý): Python + FastAPI + SQLAlchemy
+- Frontend (giao diện): React + Vite
+- Backend (phần xử lý): Python + FastAPI
 - Database (cơ sở dữ liệu): PostgreSQL
-- Storage (kho file): sẽ chuyển sang dịch vụ lưu trữ riêng ở bước bảo mật
+- Storage (kho lưu file): local cho phát triển, S3-compatible cho production
 - Source code (mã nguồn): GitHub
 
-## Chạy nhanh PostgreSQL
+## Cấu trúc
+
+```text
+quan-ly-ho-so/
+├── frontend/
+├── backend/
+├── database/
+├── docs/
+├── README.md
+└── .gitignore
+```
+
+## Chạy local (máy tính cá nhân)
+
+1. Cài Python, Node.js và Docker Desktop.
+2. Chạy PostgreSQL bằng Docker Compose (cấu hình nhiều container):
 
 ```bash
 cd database
 docker compose up -d
 ```
 
-## Chạy Backend
+3. Tạo môi trường Python và cài thư viện Backend.
+4. Chạy FastAPI.
+5. Chạy Frontend bằng Vite.
+6. Mở `http://localhost:5173/` để thử luồng nhân viên hoặc `http://localhost:5173/admin` để quản trị.
 
-```bash
-cd backend
-python -m venv .venv
-# Windows: .venv\\Scripts\\activate
-# macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
+### Demo
 
-Tạo `backend/.env` từ `.env.example` và đặt mật khẩu thật trước khi sử dụng.
+- Admin: `admin / change-me` nếu chưa cấu hình `ADMIN_PASSWORD_HASH`.
+- Nhân viên demo: `Nguyễn Văn A / 123456` nếu chưa đổi `DEMO_PERSON_PIN`.
 
-## Chạy Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Mặc định Frontend (giao diện) gọi Backend tại `http://localhost:8000`.
-
-## Lưu ý bảo mật
-
-- Không commit (ghi vào Git) file `.env`.
-- Không lưu hồ sơ cá nhân vào repository GitHub.
-- Bản 0.4 chỉ dùng local storage (kho file cục bộ) cho môi trường phát triển. Production (môi trường thật) sẽ chuyển sang Storage riêng.
-
-
-## v0.8
-
-Đã bổ sung bảo mật Admin với PBKDF2 password hash (mã băm mật khẩu), PostgreSQL session (phiên đăng nhập) có thời hạn và security headers (header bảo mật).
-
-
-## v0.8
-
-Đã bổ sung Rate Limiting (giới hạn tần suất) và Audit Log (nhật ký thao tác) cho các luồng quan trọng.
-
-
-## Phiên bản hiện tại
-
-**v1.0 — Production Ready Baseline (nền tảng sẵn sàng triển khai)**
-
-Đã có PostgreSQL, SQLAlchemy, Storage abstraction (lớp trừu tượng lưu file), Signed URL, Admin session, Rate Limiting và Audit Log. Trước khi dùng dữ liệu thật cần hoàn tất cấu hình môi trường, HTTPS, backup và kiểm thử triển khai theo `docs/production-checklist.md`.
+Không dùng thông tin demo này khi Deploy (đưa hệ thống lên Internet).

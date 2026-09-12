@@ -1,27 +1,23 @@
-from pathlib import Path
+from collections import defaultdict, deque
+from datetime import datetime, timedelta, timezone
 import os
 import secrets
+import threading
+import time
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
 from .db import engine, get_db
-from .models import AdminSession, AuditLog, Base, Document, DocumentType, Person
+from .models import AdminSession, AuditLog, Base, Document, DocumentType, Person, PersonSession
 from .security import hash_password, session_expiry, token_hash, verify_password
-from .storage import (
-    MAX_FILE_SIZE,
-    delete as storage_delete,
-    local_path,
-    new_key,
-    put_bytes,
-    signed_url,
-    validate_filename,
-)
+from .storage import MAX_FILE_SIZE, delete as storage_delete, local_path, new_key, put_bytes, signed_url, validate_filename
 
-app = FastAPI(title="Quan Ly Ho So API", version="0.8.0")
+app = FastAPI(title="Quan Ly Ho So API", version="1.1.0")
+
 
 @app.middleware("http")
 async def security_headers(request, call_next):
@@ -32,25 +28,20 @@ async def security_headers(request, call_next):
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     return response
 
+
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[item.strip() for item in cors_origins.split(",") if item.strip()],
+    allow_origin_regex=r"^https?://(localhost|127.0.0.1|192.168.1.152)(:[0-9]+)?$", 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-
-# Lightweight rate limiter for the single-server development/deployment profile.
-# For multi-instance production, replace this with Redis-backed limiting.
-from collections import defaultdict, deque
-import threading
-import time
-
 _RATE_LIMIT_LOCK = threading.Lock()
 _RATE_LIMIT_EVENTS: dict[str, deque[float]] = defaultdict(deque)
+
 
 def enforce_rate_limit(key: str, limit: int, window_seconds: int) -> None:
     now = time.monotonic()
@@ -63,37 +54,72 @@ def enforce_rate_limit(key: str, limit: int, window_seconds: int) -> None:
             raise HTTPException(429, "Quá nhiều yêu cầu, vui lòng thử lại sau")
         events.append(now)
 
+
 def client_key(request: Request, prefix: str) -> str:
     host = request.client.host if request.client else "unknown"
     return f"{prefix}:{host}"
 
+
 def audit(db, action: str, target_type: str, target_id: int | None = None, detail: str | None = None) -> None:
-    # Never store passwords, session tokens, access codes, or file contents.
+    # Never store passwords, PINs, session tokens, access codes, or file contents.
     db.add(AuditLog(action=action, target_type=target_type, target_id=target_id, detail=detail))
+
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH", "")
 if not ADMIN_PASSWORD_HASH:
-    # Development-only fallback. Production must set ADMIN_PASSWORD_HASH.
     ADMIN_PASSWORD_HASH = hash_password(os.getenv("ADMIN_PASSWORD", "change-me"))
+
+PERSON_SESSION_HOURS = int(os.getenv("PERSON_SESSION_HOURS", "12"))
+
+
+def new_person_pin() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def person_session_expiry():
+    return datetime.now(timezone.utc) + timedelta(hours=PERSON_SESSION_HOURS)
+
+
+def migrate_v1_person_pins():
+    inspector = inspect(engine)
+    columns = {c["name"] for c in inspector.get_columns("people")} if inspector.has_table("people") else set()
+    if not columns or "access_pin_hash" in columns:
+        return
+
+    # v1.0 used access_code for per-person links. Keep that legacy column for
+    # compatibility, but replace its authentication role with a hashed PIN.
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE people ADD COLUMN access_pin_hash VARCHAR(255)"))
+        rows = conn.execute(text("SELECT id FROM people WHERE access_pin_hash IS NULL")).fetchall()
+        for row in rows:
+            conn.execute(
+                text("UPDATE people SET access_pin_hash = :h WHERE id = :id"),
+                {"h": hash_password(new_person_pin()), "id": row[0]},
+            )
+        conn.execute(text("ALTER TABLE people ALTER COLUMN access_pin_hash SET NOT NULL"))
 
 
 @app.on_event("startup")
 def startup():
-    # Development convenience. Production should run database/schema.sql through migrations.
     Base.metadata.create_all(bind=engine)
+    migrate_v1_person_pins()
     seed_demo_data()
     with get_db() as db:
-        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
         for session in db.scalars(select(AdminSession)).all():
-            if session.expires_at <= datetime.now(timezone.utc):
+            if session.expires_at <= now:
+                db.delete(session)
+        for session in db.scalars(select(PersonSession)).all():
+            if session.expires_at <= now:
                 db.delete(session)
 
 
 def seed_demo_data():
     with get_db() as db:
         if db.scalar(select(func.count(Person.id))) == 0:
-            db.add(Person(name="Nguyễn Văn A", code="NV001", phone="0900000000", access_code="demo-nv001"))
+            pin = os.getenv("DEMO_PERSON_PIN", "123456")
+            db.add(Person(name="Nguyễn Văn A", code="NV001", phone="0900000000", access_pin_hash=hash_password(pin)))
         if db.scalar(select(func.count(DocumentType.id))) == 0:
             db.add_all([
                 DocumentType(name="CCCD", required=True),
@@ -112,12 +138,27 @@ def require_admin(authorization: str | None):
         raise HTTPException(401, "Cần đăng nhập Admin")
     with get_db() as db:
         session = db.scalar(select(AdminSession).where(AdminSession.token_hash == token_hash(token)))
-        from datetime import datetime, timezone
         if not session or session.expires_at <= datetime.now(timezone.utc):
             if session:
                 db.delete(session)
             raise HTTPException(401, "Phiên đăng nhập đã hết hạn")
     return True
+
+
+def require_person_session(authorization: str | None) -> Person:
+    token = auth_token(authorization)
+    if not token:
+        raise HTTPException(401, "Cần xác thực nhân viên")
+    with get_db() as db:
+        session = db.scalar(select(PersonSession).where(PersonSession.token_hash == token_hash(token)))
+        if not session or session.expires_at <= datetime.now(timezone.utc):
+            if session:
+                db.delete(session)
+            raise HTTPException(401, "Phiên xác thực đã hết hạn")
+        person = db.get(Person, session.person_id)
+        if not person:
+            raise HTTPException(401, "Nhân viên không còn tồn tại")
+        return person
 
 
 def person_dict(person: Person) -> dict:
@@ -126,40 +167,28 @@ def person_dict(person: Person) -> dict:
         "name": person.name,
         "code": person.code,
         "phone": person.phone,
-        "access_code": person.access_code,
         "created_at": person.created_at,
     }
 
 
 def type_dict(item: DocumentType) -> dict:
-    return {
-        "id": item.id,
-        "name": item.name,
-        "required": item.required,
-        "created_at": item.created_at,
-    }
+    return {"id": item.id, "name": item.name, "required": item.required, "created_at": item.created_at}
 
 
 def document_status_rows(db, person_id: int):
     rows = db.execute(
         select(DocumentType, Document)
-        .outerjoin(
-            Document,
-            (Document.document_type_id == DocumentType.id) & (Document.person_id == person_id),
-        )
+        .outerjoin(Document, (Document.document_type_id == DocumentType.id) & (Document.person_id == person_id))
         .order_by(DocumentType.id)
     ).all()
-    result = []
-    for dtype, doc in rows:
-        result.append({
-            "id": dtype.id,
-            "name": dtype.name,
-            "required": dtype.required,
-            "file_name": doc.file_name if doc else None,
-            "uploaded_at": doc.uploaded_at if doc else None,
-            "submitted": 1 if doc else 0,
-        })
-    return result
+    return [{
+        "id": dtype.id,
+        "name": dtype.name,
+        "required": dtype.required,
+        "file_name": doc.file_name if doc else None,
+        "uploaded_at": doc.uploaded_at if doc else None,
+        "submitted": 1 if doc else 0,
+    } for dtype, doc in rows]
 
 
 @app.get("/api/health")
@@ -167,7 +196,7 @@ def health():
     try:
         with get_db() as db:
             db.execute(select(func.count(Person.id))).scalar_one()
-        return {"status": "ok", "database": "postgresql"}
+        return {"status": "ok", "database": "postgresql", "version": "1.1.0"}
     except Exception as exc:
         raise HTTPException(503, "Database chưa sẵn sàng") from exc
 
@@ -199,16 +228,13 @@ def admin_logout(authorization: str | None = Header(default=None)):
 
 
 @app.get("/api/people")
-def get_people(
-    q: str = Query(default="", max_length=100),
-    authorization: str | None = Header(default=None),
-):
+def get_people(q: str = Query(default="", max_length=100), authorization: str | None = Header(default=None)):
     require_admin(authorization)
     with get_db() as db:
         stmt = select(Person)
-        text = q.strip()
-        if text:
-            like = f"%{text}%"
+        text_q = q.strip()
+        if text_q:
+            like = f"%{text_q}%"
             stmt = stmt.where((Person.name.ilike(like)) | (Person.code.ilike(like)) | (Person.phone.ilike(like)))
         people = db.scalars(stmt.order_by(Person.id.desc())).all()
         counts = dict(db.execute(select(Document.person_id, func.count(Document.id)).group_by(Document.person_id)).all())
@@ -223,18 +249,34 @@ def create_person(payload: dict, authorization: str | None = Header(default=None
     phone = str(payload.get("phone", "")).strip() or None
     if not name or not code:
         raise HTTPException(400, "name và code là bắt buộc")
-
     with get_db() as db:
         if db.scalar(select(Person.id).where(Person.code == code)):
-            raise HTTPException(409, "Mã người đã tồn tại")
-        person = Person(name=name, code=code, phone=phone, access_code=f"{code.lower()}-{secrets.token_hex(5)}")
+            raise HTTPException(409, "Mã nhân viên đã tồn tại")
+        pin = new_person_pin()
+        person = Person(name=name, code=code, phone=phone, access_pin_hash=hash_password(pin))
         db.add(person)
         try:
             db.flush()
         except IntegrityError as exc:
-            raise HTTPException(409, "Mã người hoặc mã truy cập đã tồn tại") from exc
+            raise HTTPException(409, "Mã nhân viên đã tồn tại") from exc
         audit(db, "person.create", "person", person.id, detail=f"code={person.code}")
-        return person_dict(person)
+        result = person_dict(person)
+        result["pin"] = pin  # returned once; never stored in plaintext
+        return result
+
+
+@app.post("/api/people/{person_id}/reset-pin")
+def reset_person_pin(person_id: int, authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    with get_db() as db:
+        person = db.get(Person, person_id)
+        if not person:
+            raise HTTPException(404, "Không tìm thấy nhân viên")
+        pin = new_person_pin()
+        person.access_pin_hash = hash_password(pin)
+        db.query(PersonSession).filter(PersonSession.person_id == person_id).delete(synchronize_session=False)
+        audit(db, "person.pin_reset", "person", person_id, detail=f"code={person.code}")
+        return {"ok": True, "pin": pin}
 
 
 @app.get("/api/document-types")
@@ -251,10 +293,8 @@ def create_document_type(payload: dict, authorization: str | None = Header(defau
     required = bool(payload.get("required", True))
     if not name:
         raise HTTPException(400, "Tên loại giấy tờ là bắt buộc")
-
     with get_db() as db:
-        duplicate = db.scalar(select(DocumentType.id).where(func.lower(DocumentType.name) == name.lower()))
-        if duplicate:
+        if db.scalar(select(DocumentType.id).where(func.lower(DocumentType.name) == name.lower())):
             raise HTTPException(409, "Loại giấy tờ đã tồn tại")
         item = DocumentType(name=name, required=required)
         db.add(item)
@@ -272,9 +312,10 @@ def delete_person(person_id: int, authorization: str | None = Header(default=Non
     with get_db() as db:
         person = db.get(Person, person_id)
         if not person:
-            raise HTTPException(404, "Không tìm thấy người")
+            raise HTTPException(404, "Không tìm thấy nhân viên")
         for doc in db.scalars(select(Document).where(Document.person_id == person_id)).all():
             storage_delete(doc.file_url)
+        db.query(PersonSession).filter(PersonSession.person_id == person_id).delete(synchronize_session=False)
         audit(db, "person.delete", "person", person_id, detail=f"code={person.code}")
         db.delete(person)
         return {"ok": True}
@@ -309,8 +350,9 @@ def overview(authorization: str | None = Header(default=None)):
         return {
             "people": people_count,
             "document_types": type_count,
-            "submitted": submitted,
             "missing": max(expected - submitted, 0),
+            "submitted": submitted,
+            "expected": expected,
             "completion_percent": round((submitted / expected) * 100, 1) if expected else 0,
         }
 
@@ -324,28 +366,20 @@ def admin_documents(
 ):
     require_admin(authorization)
     with get_db() as db:
-        stmt = (select(Document, Person, DocumentType)
-            .join(Person, Document.person_id == Person.id)
-            .join(DocumentType, Document.document_type_id == DocumentType.id))
+        stmt = select(Document, Person, DocumentType).join(Person, Document.person_id == Person.id).join(DocumentType, Document.document_type_id == DocumentType.id)
         if person_id is not None:
             stmt = stmt.where(Document.person_id == person_id)
         if document_type_id is not None:
             stmt = stmt.where(Document.document_type_id == document_type_id)
-        text = q.strip()
-        if text:
-            like = f"%{text}%"
+        text_q = q.strip()
+        if text_q:
+            like = f"%{text_q}%"
             stmt = stmt.where((Person.name.ilike(like)) | (Person.code.ilike(like)) | (DocumentType.name.ilike(like)) | (Document.file_name.ilike(like)))
         rows = db.execute(stmt.order_by(Person.name, DocumentType.name)).all()
         return [{
-            "id": d.id,
-            "person_id": p.id,
-            "person_name": p.name,
-            "person_code": p.code,
-            "document_type_id": t.id,
-            "document_type_name": t.name,
-            "required": t.required,
-            "file_name": d.file_name,
-            "uploaded_at": d.uploaded_at,
+            "id": d.id, "person_id": p.id, "person_name": p.name, "person_code": p.code,
+            "document_type_id": t.id, "document_type_name": t.name, "required": t.required,
+            "file_name": d.file_name, "uploaded_at": d.uploaded_at,
         } for d, p, t in rows]
 
 
@@ -355,69 +389,103 @@ def admin_person(person_id: int, authorization: str | None = Header(default=None
     with get_db() as db:
         person = db.get(Person, person_id)
         if not person:
-            raise HTTPException(404, "Không tìm thấy người")
+            raise HTTPException(404, "Không tìm thấy nhân viên")
         return {"person": person_dict(person), "documents": document_status_rows(db, person_id)}
 
 
-@app.get("/api/access/{access_code}")
-def access_person(access_code: str, request: Request):
-    enforce_rate_limit(client_key(request, "access-open"), 30, 60)
-    with get_db() as db:
-        person = db.scalar(select(Person).where(Person.access_code == access_code))
-        if not person:
-            raise HTTPException(404, "Mã truy cập không hợp lệ")
-        return {
-            "person": {"id": person.id, "name": person.name, "code": person.code, "phone": person.phone},
-            "document_types": document_status_rows(db, person.id),
-        }
+# Public shared QR flow -----------------------------------------------------
 
-
-@app.post("/api/access/{access_code}/upload/{document_type_id}")
-async def upload(access_code: str, document_type_id: int, file: UploadFile = File(...), request: Request = None):
+@app.get("/api/portal/people")
+def portal_people(q: str = Query(default="", max_length=100), request: Request = None):
     if request is not None:
-        enforce_rate_limit(client_key(request, "access-upload"), 20, 300)
+        enforce_rate_limit(client_key(request, "portal-people"), 30, 60)
     with get_db() as db:
-        person = db.scalar(select(Person).where(Person.access_code == access_code))
-        dtype = db.get(DocumentType, document_type_id)
-        if not person or not dtype:
-            raise HTTPException(404, "Mã truy cập hoặc loại giấy tờ không hợp lệ")
+        stmt = select(Person.id, Person.name, Person.code).order_by(Person.name)
+        text_q = q.strip()
+        if text_q:
+            like = f"%{text_q}%"
+            stmt = stmt.where((Person.name.ilike(like)) | (Person.code.ilike(like)))
+        rows = db.execute(stmt.limit(100)).all()
+        return [{"id": r.id, "name": r.name, "code": r.code} for r in rows]
 
+
+@app.post("/api/portal/login")
+def portal_login(payload: dict, request: Request):
+    enforce_rate_limit(client_key(request, "portal-login"), 8, 300)
+    try:
+        person_id = int(payload.get("person_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Nhân viên không hợp lệ")
+    pin = str(payload.get("pin", "")).strip()
+    if len(pin) != 6 or not pin.isdigit():
+        raise HTTPException(400, "Mã xác thực phải gồm 6 chữ số")
+    with get_db() as db:
+        person = db.get(Person, person_id)
+        if not person or not verify_password(pin, person.access_pin_hash):
+            raise HTTPException(401, "Tên nhân viên hoặc mã xác thực không đúng")
+        token = secrets.token_urlsafe(32)
+        db.add(PersonSession(person_id=person.id, token_hash=token_hash(token), expires_at=person_session_expiry()))
+        audit(db, "person.login", "person", person.id, detail=f"code={person.code}")
+        return {"token": token, "person": person_dict(person), "expires_in_hours": PERSON_SESSION_HOURS}
+
+
+@app.post("/api/portal/logout")
+def portal_logout(authorization: str | None = Header(default=None)):
+    token = auth_token(authorization)
+    if token:
+        with get_db() as db:
+            session = db.scalar(select(PersonSession).where(PersonSession.token_hash == token_hash(token)))
+            if session:
+                db.delete(session)
+    return {"ok": True}
+
+
+@app.get("/api/portal/me")
+def portal_me(authorization: str | None = Header(default=None)):
+    person = require_person_session(authorization)
+    with get_db() as db:
+        return {"person": person_dict(person), "document_types": document_status_rows(db, person.id)}
+
+
+@app.post("/api/portal/upload/{document_type_id}")
+async def portal_upload(
+    document_type_id: int,
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+    request: Request = None,
+):
+    person = require_person_session(authorization)
+    if request is not None:
+        enforce_rate_limit(client_key(request, "portal-upload"), 20, 300)
+    with get_db() as db:
+        dtype = db.get(DocumentType, document_type_id)
+        if not dtype:
+            raise HTTPException(404, "Không tìm thấy loại giấy tờ")
         original_name = validate_filename(file.filename or "")
         content = await file.read()
         if len(content) > MAX_FILE_SIZE:
             raise HTTPException(400, "File vượt quá 10 MB")
-
         key = new_key(original_name, person.id, dtype.id)
         put_bytes(key, content, file.content_type)
-
-        old = db.scalar(select(Document).where(
-            Document.person_id == person.id,
-            Document.document_type_id == dtype.id,
-        ))
+        old = db.scalar(select(Document).where(Document.person_id == person.id, Document.document_type_id == dtype.id))
         old_key = old.file_url if old else None
-
         if old:
             old.file_name = original_name
             old.file_url = key
         else:
-            db.add(Document(
-                person_id=person.id,
-                document_type_id=dtype.id,
-                file_name=original_name,
-                file_url=key,
-            ))
-
+            db.add(Document(person_id=person.id, document_type_id=dtype.id, file_name=original_name, file_url=key))
         try:
             db.flush()
         except Exception:
             storage_delete(key)
             raise
-
         if old_key and old_key != key:
             storage_delete(old_key)
-
         audit(db, "document.upload", "document", old.id if old else None, detail=f"person_id={person.id};document_type_id={dtype.id}")
         return {"ok": True, "file_name": original_name}
+
+
+# Legacy access-code routes intentionally removed in v1.1. Use the single shared QR route.
 
 @app.get("/api/admin/document/{document_id}/download")
 def download_document(document_id: int, authorization: str | None = Header(default=None)):
