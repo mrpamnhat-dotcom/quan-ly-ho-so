@@ -16,7 +16,7 @@ from .models import AdminSession, AuditLog, Base, Document, DocumentType, Person
 from .security import hash_password, session_expiry, token_hash, verify_password
 from .storage import MAX_FILE_SIZE, delete as storage_delete, local_path, new_key, put_bytes, signed_url, validate_filename
 
-app = FastAPI(title="Quan Ly Ho So API", version="1.2.0")
+app = FastAPI(title="Quan Ly Ho So API", version="1.3.0")
 
 
 @app.middleware("http")
@@ -209,7 +209,7 @@ def health():
     try:
         with get_db() as db:
             db.execute(select(func.count(Person.id))).scalar_one()
-        return {"status": "ok", "database": "postgresql", "version": "1.2.0"}
+        return {"status": "ok", "database": "postgresql", "version": "1.3.0"}
     except Exception as exc:
         raise HTTPException(503, "Database chưa sẵn sàng") from exc
 
