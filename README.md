@@ -1,4 +1,4 @@
-# Quản lý hồ sơ — v1.1
+# Quản lý hồ sơ — v1.2
 
 Ứng dụng web quản lý hồ sơ cho khoảng 100 nhân viên.
 
@@ -94,3 +94,16 @@ docker compose up -d
 - Nhân viên demo: `Nguyễn Văn A / 123456` nếu chưa đổi `DEMO_PERSON_PIN`.
 
 Không dùng thông tin demo này khi Deploy (đưa hệ thống lên Internet).
+
+
+## Nhận diện Khoa Ngoại Ung Bướu & Chăm sóc giảm nhẹ
+- Logo chính thức nằm tại `frontend/public/logo.jpg`.
+- Tên hiển thị: **KHOA NGOẠI UNG BƯỚU & CHĂM SÓC GIẢM NHẸ**.
+- Đơn vị: **BỆNH VIỆN HỮU NGHỊ VIỆT TIỆP**.
+- Slogan: **Đức trí tận tâm – Nâng tầm chất lượng**.
+
+## Lưu hồ sơ tại ổ D
+Mặc định Local Storage (lưu trữ cục bộ) là `D:\Quản lý hồ sơ`. Có thể đổi bằng `STORAGE_LOCAL_DIR` trong `backend/.env`.
+
+## Nhập danh sách nhân viên
+Danh sách từ Excel được chuẩn hóa thành `database/import/people.csv`. Chạy `python -m database.import_people` từ môi trường Python của backend để đồng bộ. Mã xác thực 6 số chỉ được in một lần cho nhân viên mới. Dữ liệu nhân viên thực tế nên nằm ngoài GitHub và được đặt trong thư mục `database/import/` (đã được bỏ qua bởi Git).

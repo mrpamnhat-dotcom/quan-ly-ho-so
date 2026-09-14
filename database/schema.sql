@@ -5,6 +5,9 @@ CREATE TABLE IF NOT EXISTS people (
     name VARCHAR(150) NOT NULL,
     code VARCHAR(50) NOT NULL UNIQUE,
     phone VARCHAR(30),
+    birth_date DATE,
+    title VARCHAR(100),
+    role VARCHAR(100),
     access_pin_hash VARCHAR(255) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

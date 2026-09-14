@@ -1,3 +1,9 @@
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load backend/.env before creating the database engine.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
 import os
 from contextlib import contextmanager
 

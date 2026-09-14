@@ -6,8 +6,11 @@ from fastapi import HTTPException
 
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local").lower()
 BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+# Local Storage (lưu trữ cục bộ): default to D:\Quản lý hồ sơ on Windows.
+# Can be overridden with STORAGE_LOCAL_DIR in .env.
+_configured_local_dir = os.getenv("STORAGE_LOCAL_DIR", "D:/Quản lý hồ sơ")
+UPLOAD_DIR = Path(_configured_local_dir).expanduser()
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_FILE_SIZE = 10 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".doc", ".docx"}

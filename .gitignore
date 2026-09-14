@@ -10,3 +10,7 @@ backend/uploads/
 backend/data.db
 *.db
 .DS_Store
+
+database/import/
+
+backend/.env

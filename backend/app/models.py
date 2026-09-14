@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -13,6 +13,9 @@ class Person(Base):
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     phone: Mapped[str | None] = mapped_column(String(30))
+    birth_date: Mapped[object | None] = mapped_column(Date)
+    title: Mapped[str | None] = mapped_column(String(100))
+    role: Mapped[str | None] = mapped_column(String(100))
     access_pin_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

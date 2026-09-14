@@ -16,7 +16,7 @@ from .models import AdminSession, AuditLog, Base, Document, DocumentType, Person
 from .security import hash_password, session_expiry, token_hash, verify_password
 from .storage import MAX_FILE_SIZE, delete as storage_delete, local_path, new_key, put_bytes, signed_url, validate_filename
 
-app = FastAPI(title="Quan Ly Ho So API", version="1.1.0")
+app = FastAPI(title="Quan Ly Ho So API", version="1.2.0")
 
 
 @app.middleware("http")
@@ -33,7 +33,7 @@ cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[item.strip() for item in cors_origins.split(",") if item.strip()],
-    allow_origin_regex=r"^https?://(localhost|127.0.0.1|192.168.1.152)(:[0-9]+)?$", 
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3})(:[0-9]+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,29 +81,39 @@ def person_session_expiry():
     return datetime.now(timezone.utc) + timedelta(hours=PERSON_SESSION_HOURS)
 
 
-def migrate_v1_person_pins():
+def migrate_database():
     inspector = inspect(engine)
     columns = {c["name"] for c in inspector.get_columns("people")} if inspector.has_table("people") else set()
-    if not columns or "access_pin_hash" in columns:
+    if not columns:
         return
 
-    # v1.0 used access_code for per-person links. Keep that legacy column for
-    # compatibility, but replace its authentication role with a hashed PIN.
     with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE people ADD COLUMN access_pin_hash VARCHAR(255)"))
-        rows = conn.execute(text("SELECT id FROM people WHERE access_pin_hash IS NULL")).fetchall()
-        for row in rows:
-            conn.execute(
-                text("UPDATE people SET access_pin_hash = :h WHERE id = :id"),
-                {"h": hash_password(new_person_pin()), "id": row[0]},
-            )
-        conn.execute(text("ALTER TABLE people ALTER COLUMN access_pin_hash SET NOT NULL"))
+        if "access_pin_hash" not in columns:
+            conn.execute(text("ALTER TABLE people ADD COLUMN access_pin_hash VARCHAR(255)"))
+            rows = conn.execute(text("SELECT id FROM people WHERE access_pin_hash IS NULL")).fetchall()
+            for row in rows:
+                conn.execute(text("UPDATE people SET access_pin_hash = :h WHERE id = :id"),
+                             {"h": hash_password(new_person_pin()), "id": row[0]})
+            conn.execute(text("ALTER TABLE people ALTER COLUMN access_pin_hash SET NOT NULL"))
+
+        # v1.0 had a legacy access_code column marked NOT NULL. v1.2 no longer
+        # uses it, so allow NULL so new records can be created safely.
+        if "access_code" in columns:
+            conn.execute(text("ALTER TABLE people ALTER COLUMN access_code DROP NOT NULL"))
+
+        # Add employee profile fields introduced in v1.2.
+        if "birth_date" not in columns:
+            conn.execute(text("ALTER TABLE people ADD COLUMN birth_date DATE"))
+        if "title" not in columns:
+            conn.execute(text("ALTER TABLE people ADD COLUMN title VARCHAR(100)"))
+        if "role" not in columns:
+            conn.execute(text("ALTER TABLE people ADD COLUMN role VARCHAR(100)"))
 
 
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(bind=engine)
-    migrate_v1_person_pins()
+    migrate_database()
     seed_demo_data()
     with get_db() as db:
         now = datetime.now(timezone.utc)
@@ -167,6 +177,9 @@ def person_dict(person: Person) -> dict:
         "name": person.name,
         "code": person.code,
         "phone": person.phone,
+        "birth_date": person.birth_date,
+        "title": person.title,
+        "role": person.role,
         "created_at": person.created_at,
     }
 
@@ -196,7 +209,7 @@ def health():
     try:
         with get_db() as db:
             db.execute(select(func.count(Person.id))).scalar_one()
-        return {"status": "ok", "database": "postgresql", "version": "1.1.0"}
+        return {"status": "ok", "database": "postgresql", "version": "1.2.0"}
     except Exception as exc:
         raise HTTPException(503, "Database chưa sẵn sàng") from exc
 
